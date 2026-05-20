@@ -20,28 +20,44 @@ export class ChatManager extends AbstractJsonRepository<
   }
 
   protected generateFileName(chat: ChatConversation): string {
-    // Format: v{schemaVersion}_{title}_{updatedAt}_{id}.json
-    const encodedTitle = encodeURIComponent(chat.title)
-    return `v${chat.schemaVersion}_${encodedTitle}_${chat.updatedAt}_${chat.id}.json`
+    // Format: v{schemaVersion}_{updatedAt}_{id}.json
+    return `v${chat.schemaVersion}_${chat.updatedAt}_${chat.id}.json`
   }
 
   protected parseFileName(fileName: string): ChatConversationMetadata | null {
-    // Parse: v{schemaVersion}_{title}_{updatedAt}_{id}.json
-    const regex = new RegExp(
-      `^v${CHAT_SCHEMA_VERSION}_(.+)_(\\d+)_([0-9a-f-]+)\\.json$`,
+    const newFormatMatch = fileName.match(
+      new RegExp(`^v${CHAT_SCHEMA_VERSION}_(\\d+)_([0-9a-fA-F-]+)\\.json$`),
     )
-    const match = fileName.match(regex)
-    if (!match) return null
+    if (newFormatMatch) {
+      return {
+        id: newFormatMatch[2],
+        schemaVersion: CHAT_SCHEMA_VERSION,
+        title: '',
+        updatedAt: parseInt(newFormatMatch[1], 10),
+      }
+    }
 
-    const title = decodeURIComponent(match[1])
-    const updatedAt = parseInt(match[2], 10)
-    const id = match[3]
+    // Legacy format: v{schemaVersion}_{encodedTitle}_{updatedAt}_{id}.json
+    const legacyFormatMatch = fileName.match(
+      new RegExp(
+        `^v${CHAT_SCHEMA_VERSION}_(.+)_(\\d+)_([0-9a-fA-F-]+)\\.json$`,
+      ),
+    )
+    if (!legacyFormatMatch) return null
+
+    let title: string
+    try {
+      title = decodeURIComponent(legacyFormatMatch[1])
+    } catch (error) {
+      console.warn(`Failed to parse legacy chat filename: ${fileName}`, error)
+      return null
+    }
 
     return {
-      id,
+      id: legacyFormatMatch[3],
       schemaVersion: CHAT_SCHEMA_VERSION,
       title,
-      updatedAt,
+      updatedAt: parseInt(legacyFormatMatch[2], 10),
     }
   }
 
@@ -69,11 +85,15 @@ export class ChatManager extends AbstractJsonRepository<
 
   public async findById(id: string): Promise<ChatConversation | null> {
     const allMetadata = await this.listMetadata()
-    const targetMetadata = allMetadata.find((meta) => meta.id === id)
+    const targetMetadata = allMetadata
+      .filter((meta) => meta.id === id)
+      .sort((a, b) => b.updatedAt - a.updatedAt)
 
-    if (!targetMetadata) return null
-
-    return this.read(targetMetadata.fileName)
+    for (const metadata of targetMetadata) {
+      const chat = await this.read(metadata.fileName)
+      if (chat) return chat
+    }
+    return null
   }
 
   public async updateChat(
@@ -101,15 +121,42 @@ export class ChatManager extends AbstractJsonRepository<
 
   public async deleteChat(id: string): Promise<boolean> {
     const allMetadata = await this.listMetadata()
-    const targetMetadata = allMetadata.find((meta) => meta.id === id)
-    if (!targetMetadata) return false
+    const targetMetadata = allMetadata.filter((meta) => meta.id === id)
+    if (targetMetadata.length === 0) return false
 
-    await this.delete(targetMetadata.fileName)
-    return true
+    const results = await Promise.all(
+      targetMetadata.map((metadata) => this.delete(metadata.fileName)),
+    )
+    return results.some(Boolean)
   }
 
   public async listChats(): Promise<ChatConversationMetadata[]> {
     const metadata = await this.listMetadata()
-    return metadata.sort((a, b) => b.updatedAt - a.updatedAt)
+    const chats = await Promise.all(
+      metadata.map(async (item) => {
+        const chat = await this.read(item.fileName)
+        if (!chat) return null
+
+        return {
+          id: chat.id ?? item.id,
+          schemaVersion: chat.schemaVersion ?? item.schemaVersion,
+          title: chat.title ?? item.title,
+          updatedAt: chat.updatedAt ?? item.updatedAt,
+        }
+      }),
+    )
+
+    const latestMetadataById = new Map<string, ChatConversationMetadata>()
+    chats.forEach((chat) => {
+      if (!chat) return
+      const existing = latestMetadataById.get(chat.id)
+      if (!existing || chat.updatedAt > existing.updatedAt) {
+        latestMetadataById.set(chat.id, chat)
+      }
+    })
+
+    return [...latestMetadataById.values()].sort(
+      (a, b) => b.updatedAt - a.updatedAt,
+    )
   }
 }

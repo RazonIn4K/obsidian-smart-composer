@@ -1,5 +1,16 @@
 import { App, normalizePath } from 'obsidian'
-import path from 'path-browserify'
+import * as path from 'path-browserify'
+
+function isEnoent(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+
+  const maybeCode = (error as { code?: unknown }).code
+  return (
+    maybeCode === 'ENOENT' ||
+    error.message.includes('ENOENT') ||
+    error.message.toLowerCase().includes('no such file')
+  )
+}
 
 export abstract class AbstractJsonRepository<T, M> {
   protected dataDir: string
@@ -71,14 +82,36 @@ export abstract class AbstractJsonRepository<T, M> {
     const filePath = normalizePath(path.join(this.dataDir, fileName))
     if (!(await this.app.vault.adapter.exists(filePath))) return null
 
-    const content = await this.app.vault.adapter.read(filePath)
-    return JSON.parse(content) as T
+    try {
+      const content = await this.app.vault.adapter.read(filePath)
+      return JSON.parse(content) as T
+    } catch (error) {
+      if (isEnoent(error)) {
+        console.warn(
+          `JSON file disappeared while reading, skipping: ${filePath}`,
+        )
+        return null
+      }
+      throw error
+    }
   }
 
-  public async delete(fileName: string): Promise<void> {
+  public async delete(fileName: string): Promise<boolean> {
     const filePath = normalizePath(path.join(this.dataDir, fileName))
     if (await this.app.vault.adapter.exists(filePath)) {
-      await this.app.vault.adapter.remove(filePath)
+      try {
+        await this.app.vault.adapter.remove(filePath)
+        return true
+      } catch (error) {
+        if (isEnoent(error)) {
+          console.warn(
+            `JSON file disappeared while deleting, skipping: ${filePath}`,
+          )
+          return false
+        }
+        throw error
+      }
     }
+    return false
   }
 }
